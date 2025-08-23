@@ -1,0 +1,136 @@
+service: rag-sql-agent
+frameworkVersion: '3'
+
+plugins:
+  - serverless-python-requirements
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: ${env:AWS_REGION, 'ap-south-1'}
+  stage: ${env:STAGE, 'dev'}
+  memorySize: 1024
+  timeout: 30
+  environment:
+    AWS_REGION: ${self:provider.region}
+    EXPORT_BUCKET: ${self:service}-${self:provider.stage}-exports
+    EXPORT_PREFIX: exports
+    DDB_TABLE: ${self:service}-${self:provider.stage}-export-jobs
+    SQS_QUEUE_NAME: ${self:service}-${self:provider.stage}-export-queue
+    # DB env (use Secrets Manager/SSM in prod)
+    DB_HOST: ${env:DB_HOST}
+    DB_PORT: ${env:DB_PORT, '5432'}
+    DB_NAME: ${env:DB_NAME}
+    DB_USER: ${env:DB_USER}
+    DB_PASS: ${env:DB_PASS}
+    # LLM
+    OPENAI_API_KEY: ${env:OPENAI_API_KEY}
+    OPENAI_MODEL: ${env:OPENAI_MODEL, 'gpt-4o-mini'}
+
+package:
+  individually: true
+
+custom:
+  pythonRequirements:
+    dockerizePip: true
+    slim: true
+
+functions:
+  api:
+    handler: app/api.handler
+    package:
+      patterns:
+        - app/**
+        - shared/**
+    events:
+      - httpApi:
+          method: ANY
+          path: /{proxy+}
+      - httpApi:
+          method: ANY
+          path: /
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+        Resource:
+          - !GetAtt ExportQueue.Arn
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+          - dynamodb:GetItem
+          - dynamodb:UpdateItem
+        Resource:
+          - !GetAtt ExportJobsTable.Arn
+      - Effect: Allow
+        Action:
+          - s3:GetObject
+        Resource:
+          - arn:aws:s3:::${self:provider.environment.EXPORT_BUCKET}/*
+
+  exportWorker:
+    handler: lambda/export_worker.lambda_handler
+    timeout: 900  # 15 min for big exports
+    memorySize: 2048
+    package:
+      patterns:
+        - lambda/**
+        - shared/**
+    events:
+      - sqs:
+          arn: !GetAtt ExportQueue.Arn
+          batchSize: 1
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - s3:PutObject
+        Resource:
+          - arn:aws:s3:::${self:provider.environment.EXPORT_BUCKET}/*
+      - Effect: Allow
+        Action:
+          - dynamodb:UpdateItem
+          - dynamodb:GetItem
+        Resource:
+          - !GetAtt ExportJobsTable.Arn
+
+resources:
+  Resources:
+    ExportBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.EXPORT_BUCKET}
+        VersioningConfiguration:
+          Status: Enabled
+    ExportJobsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.DDB_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: job_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: job_id
+            KeyType: HASH
+    ExportDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-export-dlq
+        MessageRetentionPeriod: 1209600
+    ExportQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:provider.environment.SQS_QUEUE_NAME}
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt ExportDLQ.Arn
+          maxReceiveCount: 3
+
+  Outputs:
+    QueueUrl:
+      Value: !Ref ExportQueue
+    QueueArn:
+      Value: !GetAtt ExportQueue.Arn
+    BucketName:
+      Value: !Ref ExportBucket
+    TableName:
+      Value: !Ref ExportJobsTable
