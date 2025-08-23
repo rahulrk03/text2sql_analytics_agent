@@ -3,6 +3,8 @@ Database utility functions for connecting to PostgreSQL and running paginated qu
 """
 
 import os
+import json
+from typing import Iterator, Tuple
 
 import psycopg2
 
@@ -65,3 +67,64 @@ def run_page(sql: str, page: int, page_size: int):
     cur.close()
     conn.close()
     return cols, rows, total
+
+
+def stream_query_results(sql: str, page: int, page_size: int, chunk_size: int = 100) -> Iterator[str]:
+    """
+    Stream SQL query results as JSON chunks for the specified page.
+    Yields JSON fragments that can be concatenated to form a complete response.
+    
+    Args:
+        sql (str): SQL SELECT query.
+        page (int): Page number (1-based).
+        page_size (int): Number of rows per page.
+        chunk_size (int): Number of rows to fetch at a time for streaming.
+    
+    Yields:
+        str: JSON string fragments for streaming response.
+    """
+    offset = (page - 1) * page_size
+    paginated = f"SELECT * FROM ({sql}) AS sub LIMIT {page_size} OFFSET {offset}"
+    
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(paginated)
+        
+        # Get column names
+        cols = [d[0] for d in cur.description]
+        
+        # Get total count
+        total = run_count(conn, sql)
+        
+        # Start JSON response
+        yield '{"sql": ' + json.dumps(sql) + ', "columns": ' + json.dumps(cols) + ', "rows": ['
+        
+        first_row = True
+        rows_count = 0
+        
+        while True:
+            rows = cur.fetchmany(chunk_size)
+            if not rows:
+                break
+                
+            for row in rows:
+                if not first_row:
+                    yield ","
+                yield json.dumps(list(row))
+                first_row = False
+                rows_count += 1
+        
+        # Close rows array and add pagination info
+        yield '], "pagination": {'
+        yield f'"page": {page}, "page_size": {page_size}, "total_rows": {total}, '
+        yield f'"total_pages": {(total + page_size - 1) // page_size}'
+        yield '}}'
+        
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
