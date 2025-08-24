@@ -69,6 +69,16 @@ Run locally with FastAPI & Uvicorn:
 uvicorn app.api:app --reload --port 8000
 ```
 
+### Running Tests
+The project includes comprehensive unit tests for all API endpoints:
+```bash
+# Run tests with pytest
+python -m pytest tests/ -v
+
+# Or use the test runner script
+python run_tests.py
+```
+
 ---
 
 ## 📝 Customization & Notes
