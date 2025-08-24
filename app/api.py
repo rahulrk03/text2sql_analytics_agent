@@ -8,16 +8,18 @@ AWS SQS, DynamoDB, and S3, and uses a glossary for RAG enrichment.
 import os
 import time
 import uuid
+import traceback
 
 import boto3
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from mangum import Mangum
 
 # LLM (Agent)
 from openai import OpenAI
 from pydantic import BaseModel
 
-from shared.db import get_conn, run_page
+from shared.db import get_conn, run_page, stream_query_results
 from shared.rag import build_prompt, enrich_query
 from shared.schema import get_schema_text
 from shared.security import extract_sql, is_safe
@@ -114,11 +116,13 @@ class QueryBody(BaseModel):
         question (str): The user's natural language question.
         page (int): The page number for pagination.
         page_size (int): Number of rows per page.
+        stream (bool): Whether to stream the response (default: True).
     """
 
     question: str
     page: int = 1
     page_size: int = 50
+    stream: bool = True
 
 
 class ExportBody(BaseModel):
@@ -148,44 +152,94 @@ def health():
 def query(body: QueryBody):
     """
     Endpoint to answer a user's natural language question with a SQL query and paginated results.
+    Supports both streaming and non-streaming responses.
+    
     Args:
-        body (QueryBody): The request body containing the question and pagination info.
+        body (QueryBody): The request body containing the question, pagination info, and streaming preference.
     Returns:
-        dict: The generated SQL, columns, rows, and pagination metadata.
+        StreamingResponse or dict: The generated SQL, columns, rows, and pagination metadata.
     Raises:
-        HTTPException: If LLM is not configured or SQL is unsafe/invalid.
+        HTTPException: With appropriate status codes for different error scenarios.
     """
+    # Validate LLM configuration
     if not client:
-        raise HTTPException(status_code=500, detail="LLM not configured")
+        raise HTTPException(status_code=503, detail="LLM service not configured")
 
-    schema = get_schema_text()
-    enriched = enrich_query(body.question)
-    prompt = build_prompt(body.question, schema, enriched)
+    try:
+        # Generate SQL using LLM
+        schema = get_schema_text()
+        enriched = enrich_query(body.question)
+        prompt = build_prompt(body.question, schema, enriched)
 
-    r = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0,
-    )
-    sql = extract_sql(r.choices[0].message.content or "")
-    if not sql.lower().startswith("select") or not is_safe(sql):
-        raise HTTPException(status_code=400, detail="Unsafe or invalid SQL generated")
+        try:
+            r = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+            )
+        except Exception as e:
+            # LLM API error
+            raise HTTPException(
+                status_code=502, 
+                detail=f"LLM service error: {str(e)}"
+            )
 
-    cols, rows, total = run_page(sql, body.page, body.page_size)
-    return {
-        "sql": sql,
-        "columns": cols,
-        "rows": rows,
-        "pagination": {
-            "page": body.page,
-            "page_size": body.page_size,
-            "total_rows": total,
-            "total_pages": (total + body.page_size - 1) // body.page_size,
-        },
-    }
+        # Extract and validate SQL
+        sql = extract_sql(r.choices[0].message.content or "")
+        if not sql.lower().startswith("select") or not is_safe(sql):
+            raise HTTPException(status_code=400, detail="Unsafe or invalid SQL generated")
+
+        # Execute query with appropriate response format
+        if body.stream:
+            # Return streaming response
+            try:
+                return StreamingResponse(
+                    stream_query_results(sql, body.page, body.page_size),
+                    media_type="application/json",
+                    headers={"Cache-Control": "no-cache"}
+                )
+            except Exception as e:
+                # Database execution error for streaming
+                error_msg = f"Database error: {str(e)}"
+                if "connection" in str(e).lower() or "connect" in str(e).lower():
+                    raise HTTPException(status_code=503, detail=error_msg)
+                else:
+                    raise HTTPException(status_code=400, detail=error_msg)
+        else:
+            # Return regular JSON response
+            try:
+                cols, rows, total = run_page(sql, body.page, body.page_size)
+                return {
+                    "sql": sql,
+                    "columns": cols,
+                    "rows": rows,
+                    "pagination": {
+                        "page": body.page,
+                        "page_size": body.page_size,
+                        "total_rows": total,
+                        "total_pages": (total + body.page_size - 1) // body.page_size,
+                    },
+                }
+            except Exception as e:
+                # Database execution error for non-streaming
+                error_msg = f"Database error: {str(e)}"
+                if "connection" in str(e).lower() or "connect" in str(e).lower():
+                    raise HTTPException(status_code=503, detail=error_msg)
+                else:
+                    raise HTTPException(status_code=400, detail=error_msg)
+                    
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        # Catch-all for unexpected errors
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
 
 
 @app.post("/export/start")

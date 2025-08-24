@@ -9,6 +9,8 @@ Welcome! This project is a production-grade, serverless API that lets users quer
 ## 🚀 Features
 - **Natural Language to SQL**: Converts user questions into safe, read-only SQL using OpenAI (or AWS Bedrock) LLMs.
 - **Retrieval-Augmented Generation (RAG)**: Enriches queries with schema and business glossary hints for more accurate SQL.
+- **Streaming Responses**: Efficient streaming API for large query results with progressive JSON delivery.
+- **Robust Error Handling**: Comprehensive HTTP status codes (400, 422, 502, 503, 500) for different error scenarios.
 - **Serverless & Scalable**: Built on FastAPI, deployable to AWS Lambda via API Gateway using Mangum and Serverless Framework.
 - **Large Data Export**: Asynchronously export query results to S3 as CSV, with job status tracked in PostgreSQL and notifications via SQS.
 - **Secure by Design**: SQL safety checks, environment-based secrets, and IAM-ready for cloud best practices.
@@ -49,9 +51,15 @@ sls deploy
 
 ### 4. API Endpoints
 - `GET /health` — Health check
-- `POST /query` — `{ question, page, page_size }` → SQL + paginated results
+- `POST /query` — `{ question, page, page_size, stream }` → SQL + paginated results (streaming by default)
 - `POST /export/start` — `{ question }` → `{ job_id }`
 - `GET /export/status/{job_id}` — Get export job status & download link
+
+**Query Endpoint Details:**
+- `question` (string): Natural language question
+- `page` (int, default=1): Page number for pagination
+- `page_size` (int, default=50): Results per page
+- `stream` (bool, default=true): Enable streaming response for better performance with large datasets
 
 ---
 
