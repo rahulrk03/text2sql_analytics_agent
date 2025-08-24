@@ -72,7 +72,7 @@ class TestQueryEndpoint:
         # Make request
         response = client.post(
             "/query",
-            json={"question": "Show me all customers", "page": 1, "page_size": 10},
+            json={"question": "Show me all customers", "page": 1, "page_size": 10, "stream": False},
         )
 
         # Assertions
@@ -381,8 +381,8 @@ class TestExportStartEndpoint:
                 "/export/start",
                 json={"question": "Export all customers"},
             )
-            assert response.status_code == 503
-            assert "LLM service not configured" in response.json()["detail"]
+            assert response.status_code == 500
+            assert response.json()["detail"] == "LLM not configured"
 
     @patch("app.api.client")
     @patch("app.api.get_schema_text")
